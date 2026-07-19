@@ -10,7 +10,7 @@
 //!
 //! # Supported input devices
 //!
-//! `bevy` currently supports keyboard, mouse, gamepad, and touch inputs.
+//! `bevy` currently supports keyboard, mouse, gamepad, touch, and pen inputs.
 
 #[cfg(feature = "std")]
 extern crate std;
@@ -33,6 +33,9 @@ pub mod keyboard;
 
 #[cfg(feature = "mouse")]
 pub mod mouse;
+
+#[cfg(feature = "pen")]
+pub mod pen;
 
 // Also enabled with `mouse` because `MouseWheel` reuses `TouchPhase` for trackpad scroll phases.
 #[cfg(any(feature = "touch", feature = "mouse"))]
@@ -61,6 +64,10 @@ pub mod prelude {
     pub use crate::mouse::MouseButton;
 
     #[doc(hidden)]
+    #[cfg(feature = "pen")]
+    pub use crate::pen::{PenAction, PenButton, PenId, PenInput, PenToolKind, Pens};
+
+    #[doc(hidden)]
     #[cfg(feature = "touch")]
     pub use crate::touch::{TouchInput, Touches};
 }
@@ -85,6 +92,9 @@ use mouse::{
 
 #[cfg(feature = "touch")]
 use touch::{touch_screen_input_system, TouchInput, Touches};
+
+#[cfg(feature = "pen")]
+use pen::{pen_input_system, PenInput, Pens};
 
 #[cfg(feature = "gamepad")]
 use gamepad::{
@@ -163,6 +173,11 @@ impl Plugin for InputPlugin {
         app.add_message::<TouchInput>()
             .init_resource::<Touches>()
             .add_systems(PreUpdate, touch_screen_input_system.in_set(InputSystems));
+
+        #[cfg(feature = "pen")]
+        app.add_message::<PenInput>()
+            .init_resource::<Pens>()
+            .add_systems(PreUpdate, pen_input_system.in_set(InputSystems));
     }
 }
 

@@ -54,6 +54,7 @@ bevy_input = { path = "../bevy_input", version = "0.20.0-dev", default-features 
   "gestures",
   "keyboard",
   "mouse",
+  "pen",
   "touch",
 ] }
 bevy_math = { path = "../bevy_math", version = "0.20.0-dev", default-features = false }

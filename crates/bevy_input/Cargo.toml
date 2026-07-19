@@ -19,6 +19,7 @@ keyboard = []
 gamepad = []
 touch = []
 gestures = []
+pen = []
 
 ## Adds runtime reflection support using `bevy_reflect`.
 bevy_reflect = [

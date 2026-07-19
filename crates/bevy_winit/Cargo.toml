@@ -62,13 +62,15 @@ wgpu-types = { version = "30", optional = true }
 bytemuck = { version = "1.5", optional = true }
 
 # other
-# feature rwh_06 refers to window_raw_handle@v0.6
-winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
-accesskit_winit = { version = "0.33", default-features = false, features = [
+# Local fork with X11 tablet-tool support. This path is relative to this
+# manifest and expects Hamerons_winit to be a sibling of the Bevy repository.
+winit = { path = "../../../Hamerons_winit/winit", default-features = false }
+# Local AccessKit fork ported to the same trait-based winit 0.31 checkout.
+accesskit_winit = { path = "../../../HameronsAcceskit/platforms/winit", default-features = false, features = [
   "rwh_06",
 ] }
 approx = { version = "0.5", default-features = false }
-accesskit = "0.24"
+accesskit = { path = "../../../HameronsAcceskit/common", version = "0.24" }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "android")'.dependencies]

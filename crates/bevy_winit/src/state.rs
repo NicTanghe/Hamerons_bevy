@@ -1,3 +1,4 @@
+use alloc::sync::Arc;
 use approx::relative_eq;
 use bevy_app::{App, AppExit, PluginsState};
 use bevy_ecs::{
@@ -11,20 +12,26 @@ use bevy_ecs::{
 use bevy_input::{
     gestures::*,
     mouse::{MouseButtonInput, MouseMotion, MouseScrollUnit, MouseWheel},
+    pen::{PenAction, PenInfo, PenInput},
+    touch::TouchPhase,
 };
 use bevy_log::{trace, warn};
 use bevy_math::{ivec2, DVec2, Vec2};
+use bevy_platform::collections::HashMap;
 use bevy_platform::time::Instant;
 #[cfg(not(target_arch = "wasm32"))]
 use bevy_tasks::tick_global_task_pools_on_main_thread;
+use core::sync::atomic::{AtomicBool, Ordering};
+use std::{path::PathBuf, sync::Mutex};
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::EventLoopExtWebSys;
 use winit::{
     application::ApplicationHandler,
-    dpi::PhysicalSize,
+    data_transfer::TypeHint,
+    dpi::{PhysicalPosition, PhysicalSize},
     event,
-    event::{DeviceEvent, DeviceId, StartCause, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    event::{ButtonSource, DeviceEvent, PointerKind, PointerSource, StartCause, WindowEvent},
+    event_loop::{ActiveEventLoop, ControlFlow, DndAction, EventLoop},
     window::WindowId,
 };
 
@@ -43,8 +50,29 @@ use crate::{
     create_windows,
     system::{create_monitors, CachedWindow, WinitWindowPressedKeys},
     AppSendEvent, CreateMonitorParams, CreateWindowParams, RawWinitWindowEvent, UpdateMode,
-    WinitSettings, WinitUserEvent, WINIT_WINDOWS,
+    WinitSettings, WINIT_WINDOWS,
 };
+
+struct PendingFileDrag {
+    window: Entity,
+    paths: Option<Vec<PathBuf>>,
+    dropped: bool,
+}
+
+fn send_file_drag_events(
+    events: &mut Vec<BevyWindowEvent>,
+    window: Entity,
+    paths: Vec<PathBuf>,
+    dropped: bool,
+) {
+    for path_buf in paths {
+        if dropped {
+            events.send(FileDragAndDrop::DroppedFile { window, path_buf });
+        } else {
+            events.send(FileDragAndDrop::HoveredFile { window, path_buf });
+        }
+    }
+}
 
 /// Persistent state that is used to run the [`App`] according to the current
 /// [`UpdateMode`].
@@ -52,7 +80,9 @@ pub(crate) struct WinitAppRunnerState {
     /// The running app.
     app: App,
     /// Exit value once the loop is finished.
-    app_exit: Option<AppExit>,
+    app_exit: Arc<Mutex<Option<AppExit>>>,
+    /// Coalesced notification that an ECS window component was added.
+    window_added: Arc<AtomicBool>,
     /// Current update mode of the app.
     update_mode: UpdateMode,
     /// Is `true` if a new [`WindowEvent`] event has been received since the last update.
@@ -78,6 +108,11 @@ pub(crate) struct WinitAppRunnerState {
     bevy_window_events: Vec<bevy_window::WindowEvent>,
     /// Raw Winit window events to send
     raw_winit_events: Vec<RawWinitWindowEvent>,
+    /// Active touch contacts used to distinguish a normal release-followed-by-leave
+    /// sequence from a canceled touch.
+    active_touches: HashMap<usize, (PhysicalPosition<f64>, Option<event::Force>)>,
+    /// File transfers requested from winit's asynchronous drag-and-drop API.
+    pending_file_drags: HashMap<i64, PendingFileDrag>,
 
     windows_system_state: SystemState<
         Query<
@@ -95,7 +130,11 @@ pub(crate) struct WinitAppRunnerState {
 }
 
 impl WinitAppRunnerState {
-    fn new(mut app: App) -> Self {
+    fn new(
+        mut app: App,
+        app_exit: Arc<Mutex<Option<AppExit>>>,
+        window_added: Arc<AtomicBool>,
+    ) -> Self {
         let windows_system_state: SystemState<
             Query<(&mut Window, &mut CachedWindow, &mut WinitWindowPressedKeys)>,
         > = SystemState::new(app.world_mut());
@@ -104,7 +143,8 @@ impl WinitAppRunnerState {
             app,
             lifecycle: AppLifecycle::Idle,
             previous_lifecycle: AppLifecycle::Idle,
-            app_exit: None,
+            app_exit,
+            window_added,
             update_mode: UpdateMode::Continuous,
             window_event_received: false,
             device_event_received: false,
@@ -116,6 +156,8 @@ impl WinitAppRunnerState {
             startup_forced_updates: 5,
             bevy_window_events: Vec::new(),
             raw_winit_events: Vec::new(),
+            active_touches: HashMap::new(),
+            pending_file_drags: HashMap::new(),
             windows_system_state,
             scheduled_tick_start: None,
         }
@@ -136,8 +178,8 @@ impl WinitAppRunnerState {
     }
 }
 
-impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
-    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+impl ApplicationHandler for WinitAppRunnerState {
+    fn new_events(&mut self, event_loop: &dyn ActiveEventLoop, cause: StartCause) {
         if event_loop.exiting() {
             return;
         }
@@ -170,36 +212,35 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
         };
     }
 
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+    fn resumed(&mut self, _event_loop: &dyn ActiveEventLoop) {
         // Mark the state as `WillResume`. This will let the schedule run one extra time
         // when actually resuming the app
         self.lifecycle = AppLifecycle::WillResume;
+    }
 
-        // Create the initial window if needed
+    fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
+        self.lifecycle = AppLifecycle::WillResume;
+
+        // Create the initial window if needed.
         let mut create_window = SystemState::<CreateWindowParams>::from_world(self.world_mut());
         create_windows(event_loop, create_window.get_mut(self.world_mut()).unwrap());
         create_window.apply(self.world_mut());
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WinitUserEvent) {
+    fn proxy_wake_up(&mut self, event_loop: &dyn ActiveEventLoop) {
         self.user_event_received = true;
+        self.redraw_requested = true;
 
-        match event {
-            WinitUserEvent::WakeUp => {
-                self.redraw_requested = true;
-            }
-            WinitUserEvent::WindowAdded => {
-                let mut create_window =
-                    SystemState::<CreateWindowParams>::from_world(self.world_mut());
-                create_windows(event_loop, create_window.get_mut(self.world_mut()).unwrap());
-                create_window.apply(self.world_mut());
-            }
+        if self.window_added.swap(false, Ordering::AcqRel) {
+            let mut create_window = SystemState::<CreateWindowParams>::from_world(self.world_mut());
+            create_windows(event_loop, create_window.get_mut(self.world_mut()).unwrap());
+            create_window.apply(self.world_mut());
         }
     }
 
     fn window_event(
         &mut self,
-        _event_loop: &ActiveEventLoop,
+        event_loop: &dyn ActiveEventLoop,
         window_id: WindowId,
         event: WindowEvent,
     ) {
@@ -241,11 +282,11 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
                 if let Some(adapter) = access_kit_adapters.get_mut(&window)
                     && let Some(winit_window) = winit_windows.get_window(window)
                 {
-                    adapter.process_event(winit_window, &event);
+                    adapter.process_event(winit_window.as_ref(), &event);
                 }
 
                 match event {
-                    WindowEvent::Resized(size) => self
+                    WindowEvent::SurfaceResized(size) => self
                         .bevy_window_events
                         .send(react_to_resize(window, &mut win, size)),
                     WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -281,37 +322,184 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
                         }
                         self.bevy_window_events.send(keyboard_input);
                     }
-                    WindowEvent::CursorMoved { position, .. } => {
-                        let physical_position = DVec2::new(position.x, position.y);
+                    WindowEvent::PointerMoved {
+                        device_id,
+                        position,
+                        primary,
+                        source,
+                    } => match source {
+                        PointerSource::Mouse | PointerSource::Unknown => {
+                            let physical_position = DVec2::new(position.x, position.y);
+                            let last_position = win.physical_cursor_position();
+                            let delta = last_position.map(|last_pos| {
+                                (physical_position.as_vec2() - last_pos)
+                                    / win.resolution.scale_factor()
+                            });
 
-                        let last_position = win.physical_cursor_position();
-                        let delta = last_position.map(|last_pos| {
-                            (physical_position.as_vec2() - last_pos) / win.resolution.scale_factor()
-                        });
-
-                        win.set_physical_cursor_position(Some(physical_position));
-                        let position =
-                            (physical_position / win.resolution.scale_factor() as f64).as_vec2();
-                        self.bevy_window_events.send(CursorMoved {
-                            window,
-                            position,
-                            delta,
-                        });
-                    }
-                    WindowEvent::CursorEntered { .. } => {
-                        self.bevy_window_events.send(CursorEntered { window });
-                    }
-                    WindowEvent::CursorLeft { .. } => {
-                        win.set_physical_cursor_position(None);
-                        self.bevy_window_events.send(CursorLeft { window });
-                    }
-                    WindowEvent::MouseInput { state, button, .. } => {
-                        self.bevy_window_events.send(MouseButtonInput {
-                            button: converters::convert_mouse_button(button),
-                            state: converters::convert_element_state(state),
-                            window,
-                        });
-                    }
+                            win.set_physical_cursor_position(Some(physical_position));
+                            let position = (physical_position
+                                / win.resolution.scale_factor() as f64)
+                                .as_vec2();
+                            self.bevy_window_events.send(CursorMoved {
+                                window,
+                                position,
+                                delta,
+                            });
+                        }
+                        PointerSource::Touch { finger_id, force } => {
+                            if let Some(contact) =
+                                self.active_touches.get_mut(&finger_id.into_raw())
+                            {
+                                *contact = (position, force);
+                                let location = position
+                                    .to_logical::<f64>(win.resolution.scale_factor() as f64);
+                                self.bevy_window_events
+                                    .send(converters::convert_touch_input(
+                                        TouchPhase::Moved,
+                                        location,
+                                        force,
+                                        finger_id,
+                                        window,
+                                    ));
+                            }
+                        }
+                        PointerSource::TabletTool { kind, data } => {
+                            let location =
+                                position.to_logical::<f64>(win.resolution.scale_factor() as f64);
+                            self.bevy_window_events.send(PenInput {
+                                pen: PenInfo {
+                                    window,
+                                    device: converters::convert_pen_id(device_id),
+                                    primary,
+                                    position: Some(Vec2::new(location.x as f32, location.y as f32)),
+                                    tool: converters::convert_pen_tool_kind(kind),
+                                },
+                                action: PenAction::Moved(converters::convert_pen_data(data)),
+                            });
+                        }
+                    },
+                    WindowEvent::PointerEntered {
+                        device_id,
+                        position,
+                        primary,
+                        kind,
+                    } => match kind {
+                        PointerKind::Mouse | PointerKind::Unknown => {
+                            self.bevy_window_events.send(CursorEntered { window });
+                        }
+                        PointerKind::Touch(_) => {}
+                        PointerKind::TabletTool(kind) => {
+                            let location =
+                                position.to_logical::<f64>(win.resolution.scale_factor() as f64);
+                            self.bevy_window_events.send(PenInput {
+                                pen: PenInfo {
+                                    window,
+                                    device: converters::convert_pen_id(device_id),
+                                    primary,
+                                    position: Some(Vec2::new(location.x as f32, location.y as f32)),
+                                    tool: converters::convert_pen_tool_kind(kind),
+                                },
+                                action: PenAction::Entered,
+                            });
+                        }
+                    },
+                    WindowEvent::PointerLeft {
+                        device_id,
+                        position,
+                        primary,
+                        kind,
+                    } => match kind {
+                        PointerKind::Mouse | PointerKind::Unknown => {
+                            win.set_physical_cursor_position(None);
+                            self.bevy_window_events.send(CursorLeft { window });
+                        }
+                        PointerKind::Touch(finger_id) => {
+                            if let Some((last_position, force)) =
+                                self.active_touches.remove(&finger_id.into_raw())
+                            {
+                                let position = position.unwrap_or(last_position);
+                                let location = position
+                                    .to_logical::<f64>(win.resolution.scale_factor() as f64);
+                                self.bevy_window_events
+                                    .send(converters::convert_touch_input(
+                                        TouchPhase::Canceled,
+                                        location,
+                                        force,
+                                        finger_id,
+                                        window,
+                                    ));
+                            }
+                        }
+                        PointerKind::TabletTool(kind) => {
+                            let position = position.map(|position| {
+                                let location = position
+                                    .to_logical::<f64>(win.resolution.scale_factor() as f64);
+                                Vec2::new(location.x as f32, location.y as f32)
+                            });
+                            self.bevy_window_events.send(PenInput {
+                                pen: PenInfo {
+                                    window,
+                                    device: converters::convert_pen_id(device_id),
+                                    primary,
+                                    position,
+                                    tool: converters::convert_pen_tool_kind(kind),
+                                },
+                                action: PenAction::Left,
+                            });
+                        }
+                    },
+                    WindowEvent::PointerButton {
+                        device_id,
+                        state,
+                        position,
+                        primary,
+                        button,
+                    } => match button {
+                        ButtonSource::Mouse(button) => {
+                            self.bevy_window_events.send(MouseButtonInput {
+                                button: converters::convert_mouse_button(button),
+                                state: converters::convert_element_state(state),
+                                window,
+                            });
+                        }
+                        ButtonSource::Touch { finger_id, force } => {
+                            let phase = if state.is_pressed() {
+                                self.active_touches
+                                    .insert(finger_id.into_raw(), (position, force));
+                                TouchPhase::Started
+                            } else {
+                                TouchPhase::Ended
+                            };
+                            let location =
+                                position.to_logical::<f64>(win.resolution.scale_factor() as f64);
+                            self.bevy_window_events
+                                .send(converters::convert_touch_input(
+                                    phase, location, force, finger_id, window,
+                                ));
+                            if !state.is_pressed() {
+                                self.active_touches.remove(&finger_id.into_raw());
+                            }
+                        }
+                        ButtonSource::TabletTool { kind, button, data } => {
+                            let location =
+                                position.to_logical::<f64>(win.resolution.scale_factor() as f64);
+                            self.bevy_window_events.send(PenInput {
+                                pen: PenInfo {
+                                    window,
+                                    device: converters::convert_pen_id(device_id),
+                                    primary,
+                                    position: Some(Vec2::new(location.x as f32, location.y as f32)),
+                                    tool: converters::convert_pen_tool_kind(kind),
+                                },
+                                action: PenAction::Button {
+                                    button: converters::convert_pen_button(button),
+                                    state: converters::convert_element_state(state),
+                                    data: converters::convert_pen_data(data),
+                                },
+                            });
+                        }
+                        ButtonSource::Unknown(_) => {}
+                    },
                     WindowEvent::PinchGesture { delta, .. } => {
                         self.bevy_window_events.send(PinchGesture(delta as f32));
                     }
@@ -350,13 +538,6 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
                             }
                         }
                     }
-                    WindowEvent::Touch(touch) => {
-                        let location = touch
-                            .location
-                            .to_logical(win.resolution.scale_factor() as f64);
-                        self.bevy_window_events
-                            .send(converters::convert_touch_input(touch, location, window));
-                    }
                     WindowEvent::Focused(focused) => {
                         win.focused = focused;
                         self.bevy_window_events
@@ -366,17 +547,88 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
                         self.bevy_window_events
                             .send(WindowOccluded { window, occluded });
                     }
-                    WindowEvent::DroppedFile(path_buf) => {
-                        self.bevy_window_events
-                            .send(FileDragAndDrop::DroppedFile { window, path_buf });
+                    WindowEvent::DragEntered { id, .. } => {
+                        if event_loop
+                            .data_transfer(id)
+                            .is_ok_and(|transfer| transfer.has_type(&TypeHint::UriList))
+                        {
+                            self.pending_file_drags.insert(
+                                id.into_raw(),
+                                PendingFileDrag {
+                                    window,
+                                    paths: None,
+                                    dropped: false,
+                                },
+                            );
+
+                            if let Err(error) =
+                                event_loop.set_valid_dnd_actions(id, &[DndAction::Copy])
+                            {
+                                warn!("failed to accept file drag {id:?}: {error}");
+                            }
+                            if let Err(error) =
+                                event_loop.fetch_data_transfer(id, &TypeHint::UriList)
+                            {
+                                warn!("failed to request paths for file drag {id:?}: {error}");
+                            }
+                        }
                     }
-                    WindowEvent::HoveredFile(path_buf) => {
-                        self.bevy_window_events
-                            .send(FileDragAndDrop::HoveredFile { window, path_buf });
+                    WindowEvent::DragDropped { id, .. } => {
+                        let paths =
+                            self.pending_file_drags
+                                .get_mut(&id.into_raw())
+                                .and_then(|pending| {
+                                    pending.dropped = true;
+                                    pending.paths.clone()
+                                });
+
+                        if let Some(paths) = paths {
+                            send_file_drag_events(
+                                &mut self.bevy_window_events,
+                                window,
+                                paths,
+                                true,
+                            );
+                            self.pending_file_drags.remove(&id.into_raw());
+                        } else if self.pending_file_drags.contains_key(&id.into_raw())
+                            && let Err(error) =
+                                event_loop.fetch_data_transfer(id, &TypeHint::UriList)
+                        {
+                            warn!("failed to request dropped file paths for {id:?}: {error}");
+                        }
                     }
-                    WindowEvent::HoveredFileCancelled => {
-                        self.bevy_window_events
-                            .send(FileDragAndDrop::HoveredFileCanceled { window });
+                    WindowEvent::DragLeft { id } => {
+                        if let Some(pending) = self.pending_file_drags.remove(&id.into_raw()) {
+                            self.bevy_window_events
+                                .send(FileDragAndDrop::HoveredFileCanceled {
+                                    window: pending.window,
+                                });
+                        }
+                    }
+                    WindowEvent::DataTransferReceived { id, value, .. } => {
+                        if value.type_().hint() == Some(TypeHint::UriList)
+                            && let Some(pending) = self.pending_file_drags.get_mut(&id.into_raw())
+                        {
+                            match value.try_as_file_paths() {
+                                Ok(paths) => {
+                                    let dropped = pending.dropped;
+                                    let window = pending.window;
+                                    pending.paths = Some(paths.clone());
+                                    send_file_drag_events(
+                                        &mut self.bevy_window_events,
+                                        window,
+                                        paths,
+                                        dropped,
+                                    );
+                                    if dropped {
+                                        self.pending_file_drags.remove(&id.into_raw());
+                                    }
+                                }
+                                Err(error) => {
+                                    warn!("failed to read paths for file drag {id:?}: {error}");
+                                }
+                            }
+                        }
                     }
                     WindowEvent::Moved(position) => {
                         let position = ivec2(position.x, position.y);
@@ -401,6 +653,7 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
                         event::Ime::Disabled => {
                             self.bevy_window_events.send(Ime::Disabled { window });
                         }
+                        event::Ime::DeleteSurrounding { .. } => {}
                     },
                     WindowEvent::ThemeChanged(theme) => {
                         self.bevy_window_events.send(WindowThemeChanged {
@@ -437,25 +690,25 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
         });
 
         if manual_run_redraw_requested {
-            self.redraw_requested(_event_loop);
+            self.redraw_requested(event_loop);
         }
     }
 
     fn device_event(
         &mut self,
-        _event_loop: &ActiveEventLoop,
-        _device_id: DeviceId,
+        _event_loop: &dyn ActiveEventLoop,
+        _device_id: Option<event::DeviceId>,
         event: DeviceEvent,
     ) {
         self.device_event_received = true;
 
-        if let DeviceEvent::MouseMotion { delta: (x, y) } = event {
+        if let DeviceEvent::PointerMotion { delta: (x, y) } = event {
             let delta = Vec2::new(x as f32, y as f32);
             self.bevy_window_events.send(MouseMotion { delta });
         }
     }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
         let mut create_monitor = SystemState::<CreateMonitorParams>::from_world(self.world_mut());
         create_monitors(
             event_loop,
@@ -482,7 +735,7 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
                 })
             }
 
-            if self.app_exit.is_none()
+            if self.app_exit.lock().unwrap().is_none()
                 && (self.startup_forced_updates > 0
                     || matches!(self.update_mode, UpdateMode::Reactive { .. })
                     || self.window_event_received
@@ -493,24 +746,28 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
         }
     }
 
-    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+    fn suspended(&mut self, _event_loop: &dyn ActiveEventLoop) {
         // Mark the state as `WillSuspend`. This will let the schedule run one last time
         // before actually suspending to let the application react
         self.lifecycle = AppLifecycle::WillSuspend;
     }
 
-    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        // Drop windows while event loop is still active, before TLS destruction.
-        // Prevents panic on macOS when exiting from exclusive fullscreen.
-        WINIT_WINDOWS.with(|ww| ww.borrow_mut().windows.clear());
+    fn destroy_surfaces(&mut self, _event_loop: &dyn ActiveEventLoop) {
+        self.lifecycle = AppLifecycle::WillSuspend;
+    }
+}
 
-        let world = self.world_mut();
-        world.clear_all();
+impl Drop for WinitAppRunnerState {
+    fn drop(&mut self) {
+        // Drop windows while the event-loop-owned application state is still
+        // being torn down on the event loop thread.
+        WINIT_WINDOWS.with(|ww| ww.borrow_mut().windows.clear());
+        self.app.world_mut().clear_all();
     }
 }
 
 impl WinitAppRunnerState {
-    fn redraw_requested(&mut self, event_loop: &ActiveEventLoop) {
+    fn redraw_requested(&mut self, event_loop: &dyn ActiveEventLoop) {
         let mut redraw_message_cursor = MessageCursor::<RequestRedraw>::default();
         let mut close_message_cursor = MessageCursor::<WindowCloseRequested>::default();
 
@@ -733,7 +990,7 @@ impl WinitAppRunnerState {
         }
 
         if let Some(app_exit) = self.app.should_exit() {
-            self.app_exit = Some(app_exit);
+            *self.app_exit.lock().unwrap() = Some(app_exit);
 
             event_loop.exit();
         }
@@ -774,8 +1031,8 @@ impl WinitAppRunnerState {
     }
 
     fn forward_bevy_events(&mut self) {
-        let raw_winit_events = self.raw_winit_events.drain(..).collect::<Vec<_>>();
-        let window_events = self.bevy_window_events.drain(..).collect::<Vec<_>>();
+        let raw_winit_events = core::mem::take(&mut self.raw_winit_events);
+        let window_events = core::mem::take(&mut self.bevy_window_events);
         let world = self.world_mut();
 
         if !raw_winit_events.is_empty() {
@@ -846,6 +1103,9 @@ impl WinitAppRunnerState {
                 BevyWindowEvent::MouseWheel(e) => {
                     world.write_message(e);
                 }
+                BevyWindowEvent::PenInput(e) => {
+                    world.write_message(e);
+                }
                 BevyWindowEvent::PinchGesture(e) => {
                     world.write_message(e);
                 }
@@ -882,13 +1142,14 @@ impl WinitAppRunnerState {
 ///
 /// Overriding the app's [runner](bevy_app::App::runner) while using `WinitPlugin` will bypass the
 /// `EventLoop`.
-pub fn winit_runner(mut app: App, event_loop: EventLoop<WinitUserEvent>) -> AppExit {
+pub fn winit_runner(mut app: App, event_loop: EventLoop, window_added: Arc<AtomicBool>) -> AppExit {
     if app.plugins_state() == PluginsState::Ready {
         app.finish();
         app.cleanup();
     }
 
-    let runner_state = WinitAppRunnerState::new(app);
+    let app_exit = Arc::new(Mutex::new(None));
+    let runner_state = WinitAppRunnerState::new(app, Arc::clone(&app_exit), window_added);
 
     trace!("starting winit event loop");
     // The winit docs mention using `spawn` instead of `run` on Wasm.
@@ -899,12 +1160,11 @@ pub fn winit_runner(mut app: App, event_loop: EventLoop<WinitUserEvent>) -> AppE
             AppExit::Success
         }
         _ => {
-            let mut runner_state = runner_state;
-            if let Err(err) = event_loop.run_app(&mut runner_state) {
+            if let Err(err) = event_loop.run_app(runner_state) {
                 bevy_log::error!("winit event loop returned an error: {err}");
             }
             // If everything is working correctly then the event loop only exits after it's sent an exit code.
-            runner_state.app_exit.unwrap_or_else(|| {
+            app_exit.lock().unwrap().take().unwrap_or_else(|| {
                 bevy_log::error!("Failed to receive an app exit code! This is a bug");
                 AppExit::error()
             })

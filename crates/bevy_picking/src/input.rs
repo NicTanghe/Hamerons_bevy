@@ -1,5 +1,5 @@
 //! This module provides unsurprising default inputs to `bevy_picking` through [`PointerInput`].
-//! The included systems are responsible for sending  mouse and touch inputs to their
+//! The included systems are responsible for sending mouse, touch, and pen inputs to their
 //! respective `Pointer`s.
 //!
 //! Because this has it's own plugin, it's easy to omit it, and provide your own inputs as
@@ -16,6 +16,7 @@ use bevy_camera::RenderTarget;
 use bevy_ecs::prelude::*;
 use bevy_input::{
     mouse::MouseWheel,
+    pen::{PenAction, PenButton, PenId, PenInfo, PenInput},
     prelude::*,
     touch::{TouchInput, TouchPhase},
     ButtonState,
@@ -41,7 +42,7 @@ pub mod prelude {
 
 #[derive(Copy, Clone, Resource, Debug, Reflect)]
 #[reflect(Resource, Default, Clone)]
-/// Settings for enabling and disabling updating mouse and touch inputs for picking
+/// Settings for enabling and disabling mouse, touch, and pen inputs for picking.
 ///
 /// ## Custom initialization
 /// ```
@@ -51,6 +52,7 @@ pub mod prelude {
 ///     .insert_resource(PointerInputSettings {
 ///         is_touch_enabled: false,
 ///         is_mouse_enabled: true,
+///         is_pen_enabled: true,
 ///     })
 ///     // or DefaultPlugins
 ///     .add_plugins(PointerInputPlugin);
@@ -60,6 +62,8 @@ pub struct PointerInputSettings {
     pub is_touch_enabled: bool,
     /// Should mouse inputs be updated?
     pub is_mouse_enabled: bool,
+    /// Should pen and tablet-tool inputs be updated?
+    pub is_pen_enabled: bool,
 }
 
 impl PointerInputSettings {
@@ -70,6 +74,10 @@ impl PointerInputSettings {
     fn is_touch_enabled(state: Res<Self>) -> bool {
         state.is_touch_enabled
     }
+
+    fn is_pen_enabled(state: Res<Self>) -> bool {
+        state.is_pen_enabled
+    }
 }
 
 impl Default for PointerInputSettings {
@@ -77,14 +85,15 @@ impl Default for PointerInputSettings {
         Self {
             is_touch_enabled: true,
             is_mouse_enabled: true,
+            is_pen_enabled: true,
         }
     }
 }
 
-/// Adds mouse and touch inputs for picking pointers to your app. This is a default input plugin,
+/// Adds mouse, touch, and pen inputs for picking pointers to your app. This is a default input plugin,
 /// that you can replace with your own plugin as needed.
 ///
-/// Toggling mouse input or touch input can be done at runtime by modifying
+/// Toggling mouse, touch, or pen input can be done at runtime by modifying the
 /// [`PointerInputSettings`] resource.
 ///
 /// [`PointerInputSettings`] can be initialized with custom values, but will be
@@ -101,14 +110,94 @@ impl Plugin for PointerInputPlugin {
                 (
                     mouse_pick_events.run_if(PointerInputSettings::is_mouse_enabled),
                     touch_pick_events.run_if(PointerInputSettings::is_touch_enabled),
+                    pen_pick_events.run_if(PointerInputSettings::is_pen_enabled),
                 )
                     .chain()
                     .in_set(PickingSystems::Input),
             )
             .add_systems(
                 Last,
-                deactivate_touch_pointers.run_if(PointerInputSettings::is_touch_enabled),
+                (
+                    deactivate_touch_pointers.run_if(PointerInputSettings::is_touch_enabled),
+                    deactivate_pen_pointers.run_if(PointerInputSettings::is_pen_enabled),
+                ),
             );
+    }
+}
+
+/// Sends pen pointer events to be consumed by the core picking plugin.
+pub fn pen_pick_events(
+    mut window_events: MessageReader<WindowEvent>,
+    primary_window: Query<Entity, With<PrimaryWindow>>,
+    mut pen_cache: Local<HashMap<PenId, PenInfo>>,
+    mut commands: Commands,
+    mut pointer_inputs: MessageWriter<PointerInput>,
+) {
+    for window_event in window_events.read() {
+        let WindowEvent::PenInput(input) = window_event else {
+            continue;
+        };
+
+        let pointer = PointerId::Pen(input.pen.device);
+        let position = input.pen.position.or_else(|| {
+            pen_cache
+                .get(&input.pen.device)
+                .and_then(|pen| pen.position)
+        });
+        let Some(position) = position else {
+            if matches!(input.action, PenAction::Left) {
+                pen_cache.remove(&input.pen.device);
+            }
+            continue;
+        };
+        let location = Location {
+            target: match RenderTarget::Window(WindowRef::Entity(input.pen.window))
+                .normalize(primary_window.single().ok())
+            {
+                Some(target) => target,
+                None => continue,
+            },
+            position,
+        };
+
+        match &input.action {
+            PenAction::Entered => {
+                debug!("Spawning pen pointer {:?}", pointer);
+                if pen_cache.insert(input.pen.device, input.pen).is_none() {
+                    commands.spawn((pointer, PointerLocation::new(location)));
+                }
+            }
+            PenAction::Moved(_) => {
+                let delta = pen_cache
+                    .get(&input.pen.device)
+                    .and_then(|pen| pen.position)
+                    .map_or(Vec2::ZERO, |last| position - last);
+                pointer_inputs.write(PointerInput::new(
+                    pointer,
+                    location,
+                    PointerAction::Move { delta },
+                ));
+                pen_cache.insert(input.pen.device, input.pen);
+            }
+            PenAction::Button { button, state, .. } => {
+                let button = match button {
+                    PenButton::Contact => PointerButton::Primary,
+                    PenButton::Barrel => PointerButton::Secondary,
+                    PenButton::Other(1) => PointerButton::Middle,
+                    PenButton::Other(_) => continue,
+                };
+                let action = match state {
+                    ButtonState::Pressed => PointerAction::Press(button),
+                    ButtonState::Released => PointerAction::Release(button),
+                };
+                pointer_inputs.write(PointerInput::new(pointer, location, action));
+                pen_cache.insert(input.pen.device, input.pen);
+            }
+            PenAction::Left => {
+                pointer_inputs.write(PointerInput::new(pointer, location, PointerAction::Cancel));
+                pen_cache.remove(&input.pen.device);
+            }
+        }
     }
 }
 
@@ -296,5 +385,121 @@ pub fn deactivate_touch_pointers(
     for (entity, pointer) in despawn_list.drain() {
         debug!("Despawning pointer {:?}", pointer);
         commands.entity(entity).despawn();
+    }
+}
+
+/// Despawns pen pointers after their tool leaves sensing range.
+pub fn deactivate_pen_pointers(
+    mut commands: Commands,
+    pointers: Query<(Entity, &PointerId)>,
+    mut pens: MessageReader<PenInput>,
+) {
+    for pen in pens.read() {
+        if !matches!(pen.action, PenAction::Left) {
+            continue;
+        }
+        for (entity, pointer) in &pointers {
+            if pointer.get_pen_id() == Some(pen.pen.device) {
+                debug!("Despawning pen pointer {:?}", pointer);
+                commands.entity(entity).despawn();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_ecs::message::Messages;
+    use bevy_input::pen::{PenData, PenToolKind};
+    use bevy_window::Window;
+
+    #[test]
+    fn pen_window_events_only_create_pen_pointer_input() {
+        let mut app = App::new();
+        app.add_message::<WindowEvent>()
+            .add_message::<PointerInput>()
+            .add_systems(
+                First,
+                (mouse_pick_events, touch_pick_events, pen_pick_events).chain(),
+            );
+
+        let window = app
+            .world_mut()
+            .spawn((Window::default(), PrimaryWindow))
+            .id();
+        let device = PenId::Device(42);
+        let pen = PenInfo {
+            window,
+            device,
+            primary: true,
+            position: Some(Vec2::new(10.0, 20.0)),
+            tool: PenToolKind::Pen,
+        };
+        app.world_mut()
+            .write_message(WindowEvent::PenInput(PenInput {
+                pen,
+                action: PenAction::Entered,
+            }));
+        app.world_mut()
+            .write_message(WindowEvent::PenInput(PenInput {
+                pen: PenInfo {
+                    position: Some(Vec2::new(15.0, 27.0)),
+                    ..pen
+                },
+                action: PenAction::Moved(PenData::default()),
+            }));
+        app.world_mut()
+            .write_message(WindowEvent::PenInput(PenInput {
+                pen,
+                action: PenAction::Button {
+                    button: PenButton::Contact,
+                    state: ButtonState::Pressed,
+                    data: PenData::default(),
+                },
+            }));
+        app.world_mut()
+            .write_message(WindowEvent::PenInput(PenInput {
+                pen,
+                action: PenAction::Button {
+                    button: PenButton::Contact,
+                    state: ButtonState::Released,
+                    data: PenData::default(),
+                },
+            }));
+        app.world_mut()
+            .write_message(WindowEvent::PenInput(PenInput {
+                pen: PenInfo {
+                    position: None,
+                    ..pen
+                },
+                action: PenAction::Left,
+            }));
+
+        app.update();
+
+        let mut pointer_query = app.world_mut().query::<&PointerId>();
+        let pointers: Vec<_> = pointer_query.iter(app.world()).copied().collect();
+        assert_eq!(pointers, vec![PointerId::Pen(device)]);
+
+        let events = app.world().resource::<Messages<PointerInput>>();
+        let mut cursor = events.get_cursor();
+        let inputs: Vec<_> = cursor.read(events).collect();
+        assert_eq!(inputs.len(), 4);
+        assert!(inputs
+            .iter()
+            .all(|input| input.pointer_id == PointerId::Pen(device)));
+        assert!(inputs
+            .iter()
+            .all(|input| !input.pointer_id.is_mouse() && !input.pointer_id.is_touch()));
+        assert!(matches!(
+            inputs[1].action,
+            PointerAction::Press(PointerButton::Primary)
+        ));
+        assert!(matches!(
+            inputs[2].action,
+            PointerAction::Release(PointerButton::Primary)
+        ));
+        assert!(matches!(inputs[3].action, PointerAction::Cancel));
     }
 }

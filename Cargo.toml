@@ -721,6 +721,9 @@ web = ["bevy_internal/web"]
 # Mouse support. Automatically enabled by `bevy_window`.
 mouse = ["bevy_internal/mouse"]
 
+# Pen and tablet-tool support. Automatically enabled by `bevy_window`.
+pen = ["bevy_internal/pen"]
+
 # Keyboard support. Automatically enabled by `bevy_window`.
 keyboard = ["bevy_internal/keyboard"]
 
@@ -774,7 +777,7 @@ argh = "0.1.12"
 thiserror = "2.0"
 event-listener = "5.3.0"
 anyhow = "1"
-accesskit = "0.24"
+accesskit = { path = "../HameronsAcceskit/common", version = "0.24" }
 nonmax = "0.5"
 gltf = "1.4"
 indexmap = "2"
@@ -2971,6 +2974,18 @@ doc-scrape-examples = true
 [package.metadata.example.mouse_grab]
 name = "Mouse Grab"
 description = "Demonstrates how to grab the mouse, locking the cursor to the app's screen"
+category = "Input"
+wasm = false
+
+[[example]]
+name = "pen_input_events"
+path = "examples/input/pen_input_events.rs"
+doc-scrape-examples = true
+required-features = ["bevy_winit", "ui_bevy_render", "default_font"]
+
+[package.metadata.example.pen_input_events]
+name = "Pen Input Events"
+description = "Prints losslessly forwarded pen data and raw winit events for tablet diagnostics"
 category = "Input"
 wasm = false
 

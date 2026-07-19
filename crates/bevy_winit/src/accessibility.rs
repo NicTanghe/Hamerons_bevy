@@ -4,7 +4,7 @@ use alloc::{collections::VecDeque, sync::Arc};
 use bevy_input_focus::InputFocus;
 use core::cell::RefCell;
 use std::sync::Mutex;
-use winit::event_loop::ActiveEventLoop;
+use winit::{event_loop::ActiveEventLoop, window::Window as WinitWindow};
 
 use accesskit::{
     ActionHandler, ActionRequest, ActivationHandler, DeactivationHandler, Node, NodeId, Role, Tree,
@@ -131,8 +131,8 @@ impl DeactivationHandler for WinitDeactivationHandler {
 
 /// Prepares accessibility for a winit window.
 pub(crate) fn prepare_accessibility_for_window(
-    event_loop: &ActiveEventLoop,
-    winit_window: &winit::window::Window,
+    event_loop: &dyn ActiveEventLoop,
+    winit_window: &dyn WinitWindow,
     entity: Entity,
     name: String,
     accessibility_requested: AccessibilityRequested,

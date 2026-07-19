@@ -466,6 +466,7 @@ web = ["bevy_app/web", "bevy_platform/web", "bevy_reflect/web"]
 
 # Input sources.
 mouse = ["bevy_input/mouse", "bevy_input_focus?/mouse"]
+pen = ["bevy_input/pen"]
 keyboard = ["bevy_input/keyboard", "bevy_input_focus?/keyboard"]
 gamepad = ["bevy_input/gamepad", "bevy_input_focus?/gamepad"]
 touch = ["bevy_input/touch"]

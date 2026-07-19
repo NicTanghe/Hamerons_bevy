@@ -12,6 +12,7 @@ use bevy_camera::NormalizedRenderTarget;
 use bevy_camera::{Camera, RenderTarget};
 use bevy_ecs::prelude::*;
 use bevy_input::mouse::MouseScrollUnit;
+use bevy_input::pen::PenId;
 use bevy_input::touch::TouchPhase;
 use bevy_math::Vec2;
 use bevy_platform::collections::HashMap;
@@ -24,7 +25,7 @@ use core::{fmt::Debug, ops::Deref};
 
 use crate::backend::HitData;
 
-/// Identifies a unique pointer entity. `Mouse` and `Touch` pointers are automatically spawned.
+/// Identifies a unique pointer entity. Mouse, touch, and pen pointers are automatically spawned.
 ///
 /// This component is needed because pointers can be spawned and despawned, but they need to have a
 /// stable ID that persists regardless of the Entity they are associated with.
@@ -37,6 +38,8 @@ pub enum PointerId {
     Mouse,
     /// A touch input, usually numbered by window touch events from `winit`.
     Touch(u64),
+    /// A pen or tablet tool, kept distinct from mouse and touch identity.
+    Pen(PenId),
     /// A custom, uniquely identified pointer. Useful for mocking inputs or implementing a software
     /// controlled cursor.
     #[reflect(ignore, clone)]
@@ -52,6 +55,10 @@ impl PointerId {
     pub fn is_mouse(&self) -> bool {
         matches!(self, PointerId::Mouse)
     }
+    /// Returns true if the pointer is a pen or tablet tool.
+    pub fn is_pen(&self) -> bool {
+        matches!(self, PointerId::Pen(_))
+    }
     /// Returns true if the pointer is a custom input.
     pub fn is_custom(&self) -> bool {
         matches!(self, PointerId::Custom(_))
@@ -59,6 +66,15 @@ impl PointerId {
     /// Returns the touch id if the pointer is a touch input.
     pub fn get_touch_id(&self) -> Option<u64> {
         if let PointerId::Touch(id) = self {
+            Some(*id)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the pen device id if this is a pen pointer.
+    pub fn get_pen_id(&self) -> Option<PenId> {
+        if let PointerId::Pen(id) = self {
             Some(*id)
         } else {
             None

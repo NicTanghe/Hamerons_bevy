@@ -6,6 +6,7 @@ use bevy_input::{
     gestures::*,
     keyboard::{KeyboardFocusLost, KeyboardInput},
     mouse::{MouseButtonInput, MouseMotion, MouseWheel},
+    pen::PenInput,
     touch::TouchInput,
 };
 use bevy_math::{IVec2, Vec2};
@@ -544,6 +545,9 @@ pub enum WindowEvent {
     /// The mouse wheel has moved.
     MouseWheel(MouseWheel),
 
+    /// A pen or tablet-tool input state change.
+    PenInput(PenInput),
+
     /// A two finger pinch gesture.
     PinchGesture(PinchGesture),
     /// A two finger rotation gesture.
@@ -681,6 +685,12 @@ impl From<MouseMotion> for WindowEvent {
 impl From<MouseWheel> for WindowEvent {
     fn from(e: MouseWheel) -> Self {
         Self::MouseWheel(e)
+    }
+}
+
+impl From<PenInput> for WindowEvent {
+    fn from(e: PenInput) -> Self {
+        Self::PenInput(e)
     }
 }
 

@@ -14,10 +14,15 @@
 
 extern crate alloc;
 
+use alloc::sync::Arc;
 use bevy_derive::Deref;
 use bevy_reflect::Reflect;
 use bevy_window::{ExitSystems, RawHandleWrapperHolder, WindowEvent};
-use core::cell::RefCell;
+use core::{
+    cell::RefCell,
+    ops::Deref,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use winit::{event_loop::EventLoop, window::WindowId};
 
 use bevy_a11y::AccessibilityRequested;
@@ -29,8 +34,12 @@ pub use system::{create_monitors, create_windows};
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
 pub use winit::platform::web::CustomCursorExtWebSys;
 pub use winit::{
+    cursor::{CustomCursor as WinitCustomCursor, CustomCursorSource},
+    event::{
+        ButtonSource as WinitButtonSource, PointerKind as WinitPointerKind,
+        PointerSource as WinitPointerSource, WindowEvent as WinitWindowEvent,
+    },
     event_loop::EventLoopProxy,
-    window::{CustomCursor as WinitCustomCursor, CustomCursorSource},
 };
 pub use winit_config::*;
 pub use winit_monitors::*;
@@ -82,7 +91,7 @@ impl Plugin for WinitPlugin {
     }
 
     fn build(&self, app: &mut App) {
-        let mut event_loop_builder = EventLoop::<WinitUserEvent>::with_user_event();
+        let mut event_loop_builder = EventLoop::builder();
 
         // linux check is needed because x11 might be enabled on other platforms.
         #[cfg(all(target_os = "linux", feature = "x11"))]
@@ -137,6 +146,7 @@ impl Plugin for WinitPlugin {
             .expect("Failed to build event loop");
 
         let event_loop_proxy = event_loop.create_proxy();
+        let window_added = Arc::new(AtomicBool::new(false));
 
         // Wake up the event loop when `Ctrl+C` is received so that the app can
         // exit even while idle in a reactive update mode
@@ -144,16 +154,19 @@ impl Plugin for WinitPlugin {
         {
             let event_loop_proxy = event_loop_proxy.clone();
             bevy_app::TerminalCtrlCHandlerPlugin::register_exit_handler(move || {
-                let _ = event_loop_proxy.send_event(WinitUserEvent::WakeUp);
+                event_loop_proxy.wake_up();
             });
         }
 
         app.init_resource::<WinitMonitors>()
             .init_resource::<WinitSettings>()
             .insert_resource(DisplayHandleWrapper(event_loop.owned_display_handle()))
-            .insert_resource(EventLoopProxyWrapper(event_loop_proxy))
+            .insert_resource(EventLoopProxyWrapper {
+                proxy: event_loop_proxy,
+                window_added: Arc::clone(&window_added),
+            })
             .add_message::<RawWinitWindowEvent>()
-            .set_runner(|app| winit_runner(app, event_loop))
+            .set_runner(move |app| winit_runner(app, event_loop, window_added))
             .add_systems(
                 Last,
                 (
@@ -223,8 +236,30 @@ pub struct RawWinitWindowEvent {
 /// The `EventLoopProxy` can be used to request a redraw from outside bevy.
 ///
 /// Use `Res<EventLoopProxyWrapper>` to retrieve this resource.
-#[derive(Resource, Deref)]
-pub struct EventLoopProxyWrapper(EventLoopProxy<WinitUserEvent>);
+#[derive(Resource)]
+pub struct EventLoopProxyWrapper {
+    proxy: EventLoopProxy,
+    window_added: Arc<AtomicBool>,
+}
+
+impl EventLoopProxyWrapper {
+    /// Wakes the event loop and delivers the requested Bevy-side action.
+    pub fn send_event(&self, event: WinitUserEvent) -> Result<(), core::convert::Infallible> {
+        if matches!(event, WinitUserEvent::WindowAdded) {
+            self.window_added.store(true, Ordering::Release);
+        }
+        self.proxy.wake_up();
+        Ok(())
+    }
+}
+
+impl Deref for EventLoopProxyWrapper {
+    type Target = EventLoopProxy;
+
+    fn deref(&self) -> &Self::Target {
+        &self.proxy
+    }
+}
 
 /// A wrapper around [`winit::event_loop::OwnedDisplayHandle`]
 ///
