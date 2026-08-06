@@ -564,7 +564,23 @@ impl PrepassPipeline {
         }
         if layout.0.contains(Mesh::ATTRIBUTE_COLOR) {
             shader_defs.push("VERTEX_COLORS".into());
-            vertex_attributes.push(Mesh::ATTRIBUTE_COLOR.at_shader_location(7));
+            let has_eight_influences = layout.0.contains(Mesh::ATTRIBUTE_JOINT_INDEX)
+                && layout.0.contains(Mesh::ATTRIBUTE_JOINT_WEIGHT)
+                && layout.0.contains(Mesh::ATTRIBUTE_JOINT_INDEX_1)
+                && layout.0.contains(Mesh::ATTRIBUTE_JOINT_WEIGHT_1);
+            let has_sixteen_influences = has_eight_influences
+                && layout.0.contains(Mesh::ATTRIBUTE_JOINT_INDEX_2)
+                && layout.0.contains(Mesh::ATTRIBUTE_JOINT_WEIGHT_2)
+                && layout.0.contains(Mesh::ATTRIBUTE_JOINT_INDEX_3)
+                && layout.0.contains(Mesh::ATTRIBUTE_JOINT_WEIGHT_3);
+            let color_shader_location = if has_sixteen_influences {
+                13
+            } else if has_eight_influences {
+                9
+            } else {
+                7
+            };
+            vertex_attributes.push(Mesh::ATTRIBUTE_COLOR.at_shader_location(color_shader_location));
         }
         if mesh_key.contains(MeshPipelineKey::MOTION_VECTOR_PREPASS) {
             shader_defs.push("MOTION_VECTOR_PREPASS".into());

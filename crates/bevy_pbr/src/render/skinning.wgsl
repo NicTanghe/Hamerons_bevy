@@ -42,6 +42,38 @@ fn skin_model(
 #endif  // SKINS_USE_UNIFORM_BUFFERS
 }
 
+#ifdef SKINNED_8
+fn skin_model_8(
+    indexes: vec4<u32>,
+    weights: vec4<f32>,
+    indexes_1: vec4<u32>,
+    weights_1: vec4<f32>,
+    instance_index: u32,
+) -> mat4x4<f32> {
+    return skin_model(indexes, weights, instance_index)
+        + skin_model(indexes_1, weights_1, instance_index);
+}
+#endif
+
+#ifdef SKINNED_16
+fn skin_model_16(
+    indexes: vec4<u32>,
+    weights: vec4<f32>,
+    indexes_1: vec4<u32>,
+    weights_1: vec4<f32>,
+    indexes_2: vec4<u32>,
+    weights_2: vec4<f32>,
+    indexes_3: vec4<u32>,
+    weights_3: vec4<f32>,
+    instance_index: u32,
+) -> mat4x4<f32> {
+    return skin_model(indexes, weights, instance_index)
+        + skin_model(indexes_1, weights_1, instance_index)
+        + skin_model(indexes_2, weights_2, instance_index)
+        + skin_model(indexes_3, weights_3, instance_index);
+}
+#endif
+
 // Returns the skinned position of a vertex with the given weights from the
 // previous frame.
 //
@@ -64,6 +96,38 @@ fn skin_prev_model(
         + weights.w * prev_joint_matrices[skin_index + indexes.w];
 #endif  // SKINS_USE_UNIFORM_BUFFERS
 }
+
+#ifdef SKINNED_8
+fn skin_prev_model_8(
+    indexes: vec4<u32>,
+    weights: vec4<f32>,
+    indexes_1: vec4<u32>,
+    weights_1: vec4<f32>,
+    instance_index: u32,
+) -> mat4x4<f32> {
+    return skin_prev_model(indexes, weights, instance_index)
+        + skin_prev_model(indexes_1, weights_1, instance_index);
+}
+#endif
+
+#ifdef SKINNED_16
+fn skin_prev_model_16(
+    indexes: vec4<u32>,
+    weights: vec4<f32>,
+    indexes_1: vec4<u32>,
+    weights_1: vec4<f32>,
+    indexes_2: vec4<u32>,
+    weights_2: vec4<f32>,
+    indexes_3: vec4<u32>,
+    weights_3: vec4<f32>,
+    instance_index: u32,
+) -> mat4x4<f32> {
+    return skin_prev_model(indexes, weights, instance_index)
+        + skin_prev_model(indexes_1, weights_1, instance_index)
+        + skin_prev_model(indexes_2, weights_2, instance_index)
+        + skin_prev_model(indexes_3, weights_3, instance_index);
+}
+#endif
 
 fn inverse_transpose_3x3m(in: mat3x3<f32>) -> mat3x3<f32> {
     let x = cross(in[1], in[2]);

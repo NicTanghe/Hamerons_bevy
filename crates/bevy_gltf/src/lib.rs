@@ -215,6 +215,22 @@ pub enum GltfSkinnedMeshBoundsPolicy {
     NoFrustumCulling,
 }
 
+/// The maximum number of joint influences retained for each vertex when loading a glTF mesh.
+///
+/// Choosing [`Eight`](Self::Eight) preserves up to two joint influence attribute pairs, while
+/// [`Sixteen`](Self::Sixteen) preserves up to four. Meshes use the smallest matching four-,
+/// eight-, or sixteen-influence render pipeline.
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GltfSkinningInfluenceLimit {
+    /// Retain the four strongest influences and normalize their weights.
+    Four,
+    /// Retain up to eight influences and normalize their weights.
+    #[default]
+    Eight,
+    /// Retain up to sixteen influences and normalize their weights.
+    Sixteen,
+}
+
 /// Adds support for glTF file loading to the app.
 pub struct GltfPlugin {
     /// The default image sampler to lay glTF sampler data on top of.
@@ -235,6 +251,11 @@ pub struct GltfPlugin {
     /// [`GltfLoaderSettings::skinned_mesh_bounds_policy`].
     pub skinned_mesh_bounds_policy: GltfSkinnedMeshBoundsPolicy,
 
+    /// The default maximum number of joint influences retained for each vertex.
+    /// This can be overridden per-load by
+    /// [`GltfLoaderSettings::skinning_influence_limit`].
+    pub skinning_influence_limit: GltfSkinningInfluenceLimit,
+
     /// Mesh attribute compression flags for the loaded meshes.
     pub mesh_attribute_compression: MeshAttributeCompressionFlags,
 
@@ -249,6 +270,7 @@ impl Default for GltfPlugin {
             custom_vertex_attributes: HashMap::default(),
             convert_coordinates: GltfConvertCoordinates::default(),
             skinned_mesh_bounds_policy: Default::default(),
+            skinning_influence_limit: Default::default(),
             mesh_attribute_compression: MeshAttributeCompressionFlags::empty(),
             mesh_index_compression: false,
         }
@@ -307,6 +329,7 @@ impl Plugin for GltfPlugin {
             default_convert_coordinates: self.convert_coordinates,
             extensions: extensions.0.clone(),
             default_skinned_mesh_bounds_policy: self.skinned_mesh_bounds_policy,
+            default_skinning_influence_limit: self.skinning_influence_limit,
             default_mesh_attribute_compression: self.mesh_attribute_compression,
             default_mesh_index_compression: self.mesh_index_compression,
         });

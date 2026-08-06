@@ -49,11 +49,35 @@ fn vertex(vertex_no_morph: Vertex) -> VertexOutput {
 #ifdef SKINNED
     // Use vertex_no_morph.instance_index instead of vertex.instance_index to work around a wgpu dx12 bug.
     // See https://github.com/gfx-rs/naga/issues/2416 .
+#ifdef SKINNED_16
+    var world_from_local = skinning::skin_model_16(
+        vertex.joint_indices,
+        vertex.joint_weights,
+        vertex.joint_indices_b,
+        vertex.joint_weights_b,
+        vertex.joint_indices_c,
+        vertex.joint_weights_c,
+        vertex.joint_indices_d,
+        vertex.joint_weights_d,
+        vertex_no_morph.instance_index
+    );
+#else
+#ifdef SKINNED_8
+    var world_from_local = skinning::skin_model_8(
+        vertex.joint_indices,
+        vertex.joint_weights,
+        vertex.joint_indices_b,
+        vertex.joint_weights_b,
+        vertex_no_morph.instance_index
+    );
+#else
     var world_from_local = skinning::skin_model(
         vertex.joint_indices,
         vertex.joint_weights,
         vertex_no_morph.instance_index
     );
+#endif
+#endif
 #else
     var world_from_local = mesh_world_from_local;
 #endif

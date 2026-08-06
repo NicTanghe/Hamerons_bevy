@@ -26,10 +26,28 @@ struct UncompressedVertex {
 #ifdef SKINNED
     @location(5) joint_indices: vec4<u32>,
     @location(6) joint_weights: vec4<f32>,
+#ifdef SKINNED_8
+    @location(7) joint_indices_b: vec4<u32>,
+    @location(8) joint_weights_b: vec4<f32>,
+#endif
+#ifdef SKINNED_16
+    @location(9) joint_indices_c: vec4<u32>,
+    @location(10) joint_weights_c: vec4<f32>,
+    @location(11) joint_indices_d: vec4<u32>,
+    @location(12) joint_weights_d: vec4<f32>,
+#endif
 #endif
 
 #ifdef VERTEX_COLORS
+#ifdef SKINNED_16
+    @location(13) color: vec4<f32>,
+#else
+#ifdef SKINNED_8
+    @location(9) color: vec4<f32>,
+#else
     @location(7) color: vec4<f32>,
+#endif
+#endif
 #endif
 
 #ifdef MORPH_TARGETS
@@ -79,10 +97,28 @@ struct Vertex {
 #ifdef SKINNED
     @location(5) joint_indices: vec4<u32>,
     @location(6) joint_weights: vec4<f32>,
+#ifdef SKINNED_8
+    @location(7) joint_indices_b: vec4<u32>,
+    @location(8) joint_weights_b: vec4<f32>,
+#endif
+#ifdef SKINNED_16
+    @location(9) joint_indices_c: vec4<u32>,
+    @location(10) joint_weights_c: vec4<f32>,
+    @location(11) joint_indices_d: vec4<u32>,
+    @location(12) joint_weights_d: vec4<f32>,
+#endif
 #endif
 
 #ifdef VERTEX_COLORS
+#ifdef SKINNED_16
+    @location(13) color: vec4<f32>,
+#else
+#ifdef SKINNED_8
+    @location(9) color: vec4<f32>,
+#else
     @location(7) color: vec4<f32>,
+#endif
+#endif
 #endif
 
 #ifdef MORPH_TARGETS
@@ -139,6 +175,16 @@ fn decompress_vertex(vertex_in: Vertex, instance_index: u32) -> UncompressedVert
 #ifdef SKINNED
     uncompressed_vertex.joint_indices = vertex_in.joint_indices;
     uncompressed_vertex.joint_weights = vertex_in.joint_weights;
+#ifdef SKINNED_8
+    uncompressed_vertex.joint_indices_b = vertex_in.joint_indices_b;
+    uncompressed_vertex.joint_weights_b = vertex_in.joint_weights_b;
+#endif
+#ifdef SKINNED_16
+    uncompressed_vertex.joint_indices_c = vertex_in.joint_indices_c;
+    uncompressed_vertex.joint_weights_c = vertex_in.joint_weights_c;
+    uncompressed_vertex.joint_indices_d = vertex_in.joint_indices_d;
+    uncompressed_vertex.joint_weights_d = vertex_in.joint_weights_d;
+#endif
 #endif
 #ifdef MORPH_TARGETS
     uncompressed_vertex.index = vertex_in.index;
